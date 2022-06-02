@@ -238,6 +238,7 @@ func (b *CommonBlock) Accept() error {
 	b.vm.internalState.SetLastAccepted(blkID)
 	b.vm.internalState.SetHeight(b.Hght)
 	b.vm.lastAcceptedID = blkID
+	b.vm.recentlyAccepted.Add(blkID)
 	return b.vm.metrics.AcceptBlock(b.self)
 }
 
@@ -282,7 +283,6 @@ type DoubleDecisionBlock struct {
 	CommonDecisionBlock `serialize:"true"`
 }
 
-// Accept implements the snowman.Block interface
 func (ddb *DoubleDecisionBlock) Accept() error {
 	ddb.vm.ctx.Log.Verbo("Accepting block with ID %s", ddb.ID())
 

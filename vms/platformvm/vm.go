@@ -32,9 +32,11 @@ import (
 	"github.com/ava-labs/avalanchego/utils/json"
 	"github.com/ava-labs/avalanchego/utils/logging"
 	"github.com/ava-labs/avalanchego/utils/timer/mockable"
+	"github.com/ava-labs/avalanchego/utils/window"
 	"github.com/ava-labs/avalanchego/utils/wrappers"
 	"github.com/ava-labs/avalanchego/version"
 	"github.com/ava-labs/avalanchego/vms/components/avax"
+	"github.com/ava-labs/avalanchego/vms/platformvm/fx"
 	"github.com/ava-labs/avalanchego/vms/platformvm/reward"
 	"github.com/ava-labs/avalanchego/vms/secp256k1fx"
 
@@ -51,6 +53,9 @@ const (
 
 	// Maximum future start time for staking/delegating
 	maxFutureStartTime = 24 * 7 * 2 * time.Hour
+
+	maxRecentlyAcceptedWindowSize = 256
+	recentlyAcceptedWindowTTL     = 5 * time.Minute
 )
 
 var (
@@ -63,10 +68,9 @@ var (
 	_ block.ChainVM        = &VM{}
 	_ validators.Connector = &VM{}
 	_ secp256k1fx.VM       = &VM{}
-	_ Fx                   = &secp256k1fx.Fx{}
+	_ validators.State     = &VM{}
 )
 
-// VM implements the snowman.ChainVM interface
 type VM struct {
 	Factory
 	metrics
@@ -90,9 +94,6 @@ type VM struct {
 	ctx       *snow.Context
 	dbManager manager.Manager
 
-	// channel to send messages to the consensus engine
-	toEngine chan<- common.Message
-
 	internalState InternalState
 
 	// ID of the preferred block
@@ -101,7 +102,7 @@ type VM struct {
 	// ID of the last accepted block
 	lastAcceptedID ids.ID
 
-	fx            Fx
+	fx            fx.Fx
 	codecRegistry codec.Registry
 
 	// Bootstrapped remembers if this chain has finished bootstrapping or not
@@ -123,6 +124,9 @@ type VM struct {
 	// Key: block ID
 	// Value: the block
 	currentBlocks map[ids.ID]Block
+
+	// sliding window of blocks that were recently accepted
+	recentlyAccepted *window.Window
 }
 
 // Initialize this blockchain.
@@ -133,7 +137,7 @@ func (vm *VM) Initialize(
 	genesisBytes []byte,
 	upgradeBytes []byte,
 	configBytes []byte,
-	msgs chan<- common.Message,
+	toEngine chan<- common.Message,
 	_ []*common.Fx,
 	appSender common.AppSender,
 ) error {
@@ -145,7 +149,7 @@ func (vm *VM) Initialize(
 	}
 
 	// Initialize metrics as soon as possible
-	if err := vm.metrics.Initialize("", registerer); err != nil {
+	if err := vm.metrics.Initialize("", registerer, vm.WhitelistedSubnets); err != nil {
 		return err
 	}
 
@@ -159,7 +163,6 @@ func (vm *VM) Initialize(
 
 	vm.ctx = ctx
 	vm.dbManager = dbManager
-	vm.toEngine = msgs
 
 	vm.codecRegistry = linearcodec.NewDefault()
 	if err := vm.fx.Initialize(vm); err != nil {
@@ -170,7 +173,7 @@ func (vm *VM) Initialize(
 	vm.validatorSetCaches = make(map[ids.ID]cache.Cacher)
 	vm.currentBlocks = make(map[ids.ID]Block)
 
-	if err := vm.blockBuilder.Initialize(vm, registerer); err != nil {
+	if err := vm.blockBuilder.Initialize(vm, toEngine, registerer); err != nil {
 		return fmt.Errorf(
 			"failed to initialize the block builder: %w",
 			err,
@@ -204,8 +207,14 @@ func (vm *VM) Initialize(
 		)
 	}
 
+	vm.recentlyAccepted = window.New(
+		window.Config{
+			Clock:   &vm.clock,
+			MaxSize: maxRecentlyAcceptedWindowSize,
+			TTL:     recentlyAcceptedWindowTTL,
+		},
+	)
 	vm.lastAcceptedID = is.GetLastAccepted()
-
 	ctx.Log.Info("initializing last accepted block as %s", vm.lastAcceptedID)
 
 	// Build off the most recently accepted block
@@ -279,14 +288,14 @@ func (vm *VM) createChain(tx *Tx) error {
 	return nil
 }
 
-// Bootstrapping marks this VM as bootstrapping
-func (vm *VM) Bootstrapping() error {
+// onBootstrapStarted marks this VM as bootstrapping
+func (vm *VM) onBootstrapStarted() error {
 	vm.bootstrapped.SetValue(false)
 	return vm.fx.Bootstrapping()
 }
 
-// Bootstrapped marks this VM as bootstrapped
-func (vm *VM) Bootstrapped() error {
+// onNormalOperationsStarted marks this VM as bootstrapped
+func (vm *VM) onNormalOperationsStarted() error {
 	if vm.bootstrapped.GetValue() {
 		return nil
 	}
@@ -302,7 +311,7 @@ func (vm *VM) Bootstrapped() error {
 	}
 	primaryValidators := primaryValidatorSet.List()
 
-	validatorIDs := make([]ids.ShortID, len(primaryValidators))
+	validatorIDs := make([]ids.NodeID, len(primaryValidators))
 	for i, vdr := range primaryValidators {
 		validatorIDs[i] = vdr.ID()
 	}
@@ -311,6 +320,17 @@ func (vm *VM) Bootstrapped() error {
 		return err
 	}
 	return vm.internalState.Commit()
+}
+
+func (vm *VM) SetState(state snow.State) error {
+	switch state {
+	case snow.Bootstrapping:
+		return vm.onBootstrapStarted()
+	case snow.NormalOp:
+		return vm.onNormalOperationsStarted()
+	default:
+		return snow.ErrUnknownState
+	}
 }
 
 // Shutdown this blockchain
@@ -328,7 +348,7 @@ func (vm *VM) Shutdown() error {
 		}
 		primaryValidators := primaryValidatorSet.List()
 
-		validatorIDs := make([]ids.ShortID, len(primaryValidators))
+		validatorIDs := make([]ids.NodeID, len(primaryValidators))
 		for i, vdr := range primaryValidators {
 			validatorIDs[i] = vdr.ID()
 		}
@@ -352,7 +372,6 @@ func (vm *VM) Shutdown() error {
 // BuildBlock builds a block to be added to consensus
 func (vm *VM) BuildBlock() (snowman.Block, error) { return vm.blockBuilder.BuildBlock() }
 
-// ParseBlock implements the snowman.ChainVM interface
 func (vm *VM) ParseBlock(b []byte) (snowman.Block, error) {
 	var blk Block
 	if _, err := Codec.Unmarshal(b, &blk); err != nil {
@@ -371,7 +390,6 @@ func (vm *VM) ParseBlock(b []byte) (snowman.Block, error) {
 	return blk, nil
 }
 
-// GetBlock implements the snowman.ChainVM interface
 func (vm *VM) GetBlock(blkID ids.ID) (snowman.Block, error) { return vm.getBlock(blkID) }
 
 func (vm *VM) getBlock(blkID ids.ID) (Block, error) {
@@ -400,16 +418,6 @@ func (vm *VM) SetPreference(blkID ids.ID) error {
 
 func (vm *VM) Preferred() (Block, error) {
 	return vm.getBlock(vm.preferred)
-}
-
-// NotifyBlockReady tells the consensus engine that a new block is ready to be
-// created
-func (vm *VM) NotifyBlockReady() {
-	select {
-	case vm.toEngine <- common.PendingTxs:
-	default:
-		vm.ctx.Log.Debug("dropping message to consensus engine")
-	}
 }
 
 func (vm *VM) Version() (string, error) {
@@ -455,13 +463,11 @@ func (vm *VM) CreateStaticHandlers() (map[string]*common.HTTPHandler, error) {
 	}, nil
 }
 
-// Connected implements validators.Connector
-func (vm *VM) Connected(vdrID ids.ShortID, nodeVersion version.Application) error {
+func (vm *VM) Connected(vdrID ids.NodeID, _ version.Application) error {
 	return vm.uptimeManager.Connect(vdrID)
 }
 
-// Disconnected implements validators.Connector
-func (vm *VM) Disconnected(vdrID ids.ShortID) error {
+func (vm *VM) Disconnected(vdrID ids.NodeID) error {
 	if err := vm.uptimeManager.Disconnect(vdrID); err != nil {
 		return err
 	}
@@ -470,7 +476,7 @@ func (vm *VM) Disconnected(vdrID ids.ShortID) error {
 
 // GetValidatorSet returns the validator set at the specified height for the
 // provided subnetID.
-func (vm *VM) GetValidatorSet(height uint64, subnetID ids.ID) (map[ids.ShortID]uint64, error) {
+func (vm *VM) GetValidatorSet(height uint64, subnetID ids.ID) (map[ids.NodeID]uint64, error) {
 	validatorSetsCache, exists := vm.validatorSetCaches[subnetID]
 	if !exists {
 		validatorSetsCache = &cache.LRU{Size: validatorSetsCacheSize}
@@ -481,7 +487,7 @@ func (vm *VM) GetValidatorSet(height uint64, subnetID ids.ID) (map[ids.ShortID]u
 	}
 
 	if validatorSetIntf, ok := validatorSetsCache.Get(height); ok {
-		validatorSet, ok := validatorSetIntf.(map[ids.ShortID]uint64)
+		validatorSet, ok := validatorSetIntf.(map[ids.NodeID]uint64)
 		if !ok {
 			return nil, errWrongCacheType
 		}
@@ -506,7 +512,7 @@ func (vm *VM) GetValidatorSet(height uint64, subnetID ids.ID) (map[ids.ShortID]u
 	}
 	currentValidatorList := currentValidators.List()
 
-	vdrSet := make(map[ids.ShortID]uint64, len(currentValidatorList))
+	vdrSet := make(map[ids.NodeID]uint64, len(currentValidatorList))
 	for _, vdr := range currentValidatorList {
 		vdrSet[vdr.ID()] = vdr.Weight()
 	}
@@ -551,6 +557,33 @@ func (vm *VM) GetValidatorSet(height uint64, subnetID ids.ID) (map[ids.ShortID]u
 	return vdrSet, nil
 }
 
+// GetMinimumHeight returns the height of the most recent block beyond the
+// horizon of our recentlyAccepted window.
+//
+// Because the time between blocks is arbitrary, we're only guaranteed that
+// the window's configured TTL amount of time has passed once an element
+// expires from the window.
+//
+// To try to always return a block older than the window's TTL, we return the
+// parent of the oldest element in the window (as an expired element is always
+// guaranteed to be sufficiently stale). If we haven't expired an element yet
+// in the case of a process restart, we default to the lastAccepted block's
+// height which is likely (but not guaranteed) to also be older than the
+// window's configured TTL.
+func (vm *VM) GetMinimumHeight() (uint64, error) {
+	oldest, ok := vm.recentlyAccepted.Oldest()
+	if !ok {
+		return vm.GetCurrentHeight()
+	}
+
+	blk, err := vm.GetBlock(oldest.(ids.ID))
+	if err != nil {
+		return 0, err
+	}
+
+	return blk.Height() - 1, nil
+}
+
 // GetCurrentHeight returns the height of the last accepted block
 func (vm *VM) GetCurrentHeight() (uint64, error) {
 	lastAccepted, err := vm.getBlock(vm.lastAcceptedID)
@@ -586,59 +619,30 @@ func (vm *VM) updateValidators() error {
 	return nil
 }
 
-// Returns the time when the next staker of any subnet starts/stops staking
-// after the current timestamp
-func (vm *VM) nextStakerChangeTime(vs ValidatorState) (time.Time, error) {
-	currentStakers := vs.CurrentStakerChainState()
-	pendingStakers := vs.PendingStakerChainState()
-
-	earliest := mockable.MaxTime
-	if currentStakers := currentStakers.Stakers(); len(currentStakers) > 0 {
-		nextStakerToRemove := currentStakers[0]
-		staker, ok := nextStakerToRemove.UnsignedTx.(TimedTx)
-		if !ok {
-			return time.Time{}, errWrongTxType
-		}
-		endTime := staker.EndTime()
-		if endTime.Before(earliest) {
-			earliest = endTime
-		}
-	}
-	if pendingStakers := pendingStakers.Stakers(); len(pendingStakers) > 0 {
-		nextStakerToAdd := pendingStakers[0]
-		staker, ok := nextStakerToAdd.UnsignedTx.(TimedTx)
-		if !ok {
-			return time.Time{}, errWrongTxType
-		}
-		startTime := staker.StartTime()
-		if startTime.Before(earliest) {
-			earliest = startTime
-		}
-	}
-	return earliest, nil
-}
-
 func (vm *VM) CodecRegistry() codec.Registry { return vm.codecRegistry }
 
 func (vm *VM) Clock() *mockable.Clock { return &vm.clock }
 
 func (vm *VM) Logger() logging.Logger { return vm.ctx.Log }
 
-// Returns the percentage of the total stake on the Primary Network of nodes
-// connected to this node.
-func (vm *VM) getPercentConnected() (float64, error) {
-	vdrSet, exists := vm.Validators.GetValidators(constants.PrimaryNetworkID)
+// Returns the percentage of the total stake of the subnet connected to this
+// node.
+func (vm *VM) getPercentConnected(subnetID ids.ID) (float64, error) {
+	vdrSet, exists := vm.Validators.GetValidators(subnetID)
 	if !exists {
-		return 0, errNoPrimaryValidators
+		return 0, errNoValidators
 	}
 
-	vdrs := vdrSet.List()
+	vdrSetWeight := vdrSet.Weight()
+	if vdrSetWeight == 0 {
+		return 1, nil
+	}
 
 	var (
 		connectedStake uint64
 		err            error
 	)
-	for _, vdr := range vdrs {
+	for _, vdr := range vdrSet.List() {
 		if !vm.uptimeManager.IsConnected(vdr.ID()) {
 			continue // not connected to us --> don't include
 		}
@@ -647,5 +651,5 @@ func (vm *VM) getPercentConnected() (float64, error) {
 			return 0, err
 		}
 	}
-	return float64(connectedStake) / float64(vdrSet.Weight()), nil
+	return float64(connectedStake) / float64(vdrSetWeight), nil
 }

@@ -9,14 +9,18 @@ type Op byte
 // Types of messages that may be sent between nodes
 // Note: If you add a new parseable Op below, you must also add it to ops
 // (declared below)
+//
+// "_" are used in places where old message types were defined that are no
+// longer supported. When new messages are introduced these values are typically
+// safe to reuse.
 const (
 	// Handshake:
-	GetVersion Op = iota
-	_
-	GetPeerList
+	_ Op = iota // Used to be a GetVersion message
+	_           // Used to be a Version message
+	_           // Used to be a GetPeerList message
 	Pong
 	Ping
-	_
+	_ // Used to be a Pong message
 	// Bootstrapping:
 	GetAcceptedFrontier
 	AcceptedFrontier
@@ -31,33 +35,38 @@ const (
 	PullQuery
 	Chits
 	// Handshake / peer gossiping
-	_
+	_ // Used to be a Version message
 	PeerList
 	Version
 	// Application level:
 	AppRequest
 	AppResponse
 	AppGossip
+	// State sync
+	GetStateSummaryFrontier
+	StateSummaryFrontier
+	GetAcceptedStateSummary
+	AcceptedStateSummary
 
 	// Internal messages (External messages should be added above these):
 	GetAcceptedFrontierFailed
 	GetAcceptedFailed
+	GetAncestorsFailed
 	GetFailed
 	QueryFailed
-	GetAncestorsFailed
 	AppRequestFailed
 	Timeout
 	Connected
 	Disconnected
 	Notify
 	GossipRequest
+	GetStateSummaryFrontierFailed
+	GetAcceptedStateSummaryFailed
 )
 
 var (
 	HandshakeOps = []Op{
-		GetVersion,
 		Version,
-		GetPeerList,
 		PeerList,
 		Ping,
 		Pong,
@@ -72,6 +81,8 @@ var (
 		PushQuery,
 		PullQuery,
 		AppRequest,
+		GetStateSummaryFrontier,
+		GetAcceptedStateSummary,
 	}
 	ConsensusResponseOps = []Op{
 		AcceptedFrontier,
@@ -80,6 +91,8 @@ var (
 		Put,
 		Chits,
 		AppResponse,
+		StateSummaryFrontier,
+		AcceptedStateSummary,
 	}
 	// AppGossip is the only message that is sent unrequested without the
 	// expectation of a response
@@ -93,65 +106,110 @@ var (
 	ConsensusInternalOps = []Op{
 		GetAcceptedFrontierFailed,
 		GetAcceptedFailed,
+		GetAncestorsFailed,
 		GetFailed,
 		QueryFailed,
-		GetAncestorsFailed,
 		AppRequestFailed,
 		Timeout,
 		Connected,
 		Disconnected,
 		Notify,
 		GossipRequest,
+		GetStateSummaryFrontierFailed,
+		GetAcceptedStateSummaryFailed,
 	}
 	ConsensusOps = append(ConsensusExternalOps, ConsensusInternalOps...)
 
 	ExternalOps = append(ConsensusExternalOps, HandshakeOps...)
 
+	SynchronousOps = []Op{
+		GetAcceptedFrontier,
+		AcceptedFrontier,
+		GetAccepted,
+		Accepted,
+		GetAncestors,
+		Ancestors,
+		Get,
+		Put,
+		PushQuery,
+		PullQuery,
+		Chits,
+		GetAcceptedFrontierFailed,
+		GetAcceptedFailed,
+		GetAncestorsFailed,
+		GetFailed,
+		QueryFailed,
+		Connected,
+		Disconnected,
+
+		// State sync
+		GetStateSummaryFrontier,
+		StateSummaryFrontier,
+		GetAcceptedStateSummary,
+		AcceptedStateSummary,
+		GetStateSummaryFrontierFailed,
+		GetAcceptedStateSummaryFailed,
+	}
+
+	AsynchronousOps = []Op{
+		AppRequest,
+		AppGossip,
+		AppRequestFailed,
+		AppResponse,
+	}
+
 	RequestToResponseOps = map[Op]Op{
-		GetAcceptedFrontier: AcceptedFrontier,
-		GetAccepted:         Accepted,
-		GetAncestors:        Ancestors,
-		Get:                 Put,
-		PushQuery:           Chits,
-		PullQuery:           Chits,
-		AppRequest:          AppResponse,
+		GetAcceptedFrontier:     AcceptedFrontier,
+		GetAccepted:             Accepted,
+		GetAncestors:            Ancestors,
+		Get:                     Put,
+		PushQuery:               Chits,
+		PullQuery:               Chits,
+		AppRequest:              AppResponse,
+		GetStateSummaryFrontier: StateSummaryFrontier,
+		GetAcceptedStateSummary: AcceptedStateSummary,
 	}
 	ResponseToFailedOps = map[Op]Op{
-		AcceptedFrontier: GetAcceptedFrontierFailed,
-		Accepted:         GetAcceptedFailed,
-		Ancestors:        GetAncestorsFailed,
-		Put:              GetFailed,
-		Chits:            QueryFailed,
-		AppResponse:      AppRequestFailed,
+		AcceptedFrontier:     GetAcceptedFrontierFailed,
+		Accepted:             GetAcceptedFailed,
+		Ancestors:            GetAncestorsFailed,
+		Put:                  GetFailed,
+		Chits:                QueryFailed,
+		AppResponse:          AppRequestFailed,
+		StateSummaryFrontier: GetStateSummaryFrontierFailed,
+		AcceptedStateSummary: GetAcceptedStateSummaryFailed,
 	}
 	FailedToResponseOps = map[Op]Op{
-		GetAcceptedFrontierFailed: AcceptedFrontier,
-		GetAcceptedFailed:         Accepted,
-		GetAncestorsFailed:        Ancestors,
-		GetFailed:                 Put,
-		QueryFailed:               Chits,
-		AppRequestFailed:          AppResponse,
+		GetAcceptedFrontierFailed:     AcceptedFrontier,
+		GetAcceptedFailed:             Accepted,
+		GetAncestorsFailed:            Ancestors,
+		GetFailed:                     Put,
+		QueryFailed:                   Chits,
+		AppRequestFailed:              AppResponse,
+		GetStateSummaryFrontierFailed: StateSummaryFrontier,
+		GetAcceptedStateSummaryFailed: AcceptedStateSummary,
 	}
 	UnrequestedOps = map[Op]struct{}{
-		GetAcceptedFrontier: {},
-		GetAccepted:         {},
-		GetAncestors:        {},
-		Get:                 {},
-		PushQuery:           {},
-		PullQuery:           {},
-		AppRequest:          {},
-		AppGossip:           {},
+		GetAcceptedFrontier:     {},
+		GetAccepted:             {},
+		GetAncestors:            {},
+		Get:                     {},
+		PushQuery:               {},
+		PullQuery:               {},
+		AppRequest:              {},
+		AppGossip:               {},
+		GetStateSummaryFrontier: {},
+		GetAcceptedStateSummary: {},
 	}
 
 	// Defines the messages that can be sent/received with this network
 	messages = map[Op][]Field{
 		// Handshake:
-		GetVersion:  {},
-		Version:     {NetworkID, NodeID, MyTime, IP, VersionStr, VersionTime, SigBytes, TrackedSubnets},
-		GetPeerList: {},
-		PeerList:    {SignedPeers},
-		Ping:        {},
-		Pong:        {Uptime},
+		// TODO: remove NodeID from the Version message
+		Version:  {NetworkID, NodeID, MyTime, IP, VersionStr, VersionTime, SigBytes, TrackedSubnets},
+		PeerList: {Peers},
+		Ping:     {},
+		Pong:     {Uptime},
 		// Bootstrapping:
 		GetAcceptedFrontier: {ChainID, RequestID, Deadline},
 		AcceptedFrontier:    {ChainID, RequestID, ContainerIDs},
@@ -169,12 +227,19 @@ var (
 		AppRequest:  {ChainID, RequestID, Deadline, AppBytes},
 		AppResponse: {ChainID, RequestID, AppBytes},
 		AppGossip:   {ChainID, AppBytes},
+		// State Sync
+		GetStateSummaryFrontier: {ChainID, RequestID, Deadline},
+		StateSummaryFrontier:    {ChainID, RequestID, SummaryBytes},
+		GetAcceptedStateSummary: {ChainID, RequestID, Deadline, SummaryHeights},
+		AcceptedStateSummary:    {ChainID, RequestID, SummaryIDs},
 	}
 )
 
-func (op Op) Compressable() bool {
+func (op Op) Compressible() bool {
 	switch op {
-	case PeerList, Put, Ancestors, PushQuery, AppRequest, AppResponse, AppGossip:
+	case PeerList, Put, Ancestors, PushQuery,
+		AppRequest, AppResponse, AppGossip,
+		StateSummaryFrontier, GetAcceptedStateSummary, AcceptedStateSummary:
 		return true
 	default:
 		return false
@@ -183,12 +248,8 @@ func (op Op) Compressable() bool {
 
 func (op Op) String() string {
 	switch op {
-	case GetVersion:
-		return "get_version"
 	case Version:
 		return "version"
-	case GetPeerList:
-		return "get_peerlist"
 	case PeerList:
 		return "peerlist"
 	case Ping:
@@ -223,19 +284,31 @@ func (op Op) String() string {
 		return "app_response"
 	case AppGossip:
 		return "app_gossip"
+	case GetStateSummaryFrontier:
+		return "get_state_summary_frontier"
+	case StateSummaryFrontier:
+		return "state_summary_frontier"
+	case GetAcceptedStateSummary:
+		return "get_accepted_state_summary"
+	case AcceptedStateSummary:
+		return "accepted_state_summary"
 
 	case GetAcceptedFrontierFailed:
 		return "get_accepted_frontier_failed"
 	case GetAcceptedFailed:
 		return "get_accepted_failed"
+	case GetAncestorsFailed:
+		return "get_ancestors_failed"
 	case GetFailed:
 		return "get_failed"
 	case QueryFailed:
 		return "query_failed"
-	case GetAncestorsFailed:
-		return "get_ancestors_failed"
 	case AppRequestFailed:
 		return "app_request_failed"
+	case GetStateSummaryFrontierFailed:
+		return "get_state_summary_frontier_failed"
+	case GetAcceptedStateSummaryFailed:
+		return "get_accepted_state_summary_failed"
 	case Timeout:
 		return "timeout"
 	case Connected:

@@ -12,6 +12,7 @@ import (
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/utils"
 	"github.com/ava-labs/avalanchego/utils/crypto"
+	"github.com/ava-labs/avalanchego/vms/avm/fxs"
 	"github.com/ava-labs/avalanchego/vms/components/avax"
 	"github.com/ava-labs/avalanchego/vms/components/verify"
 )
@@ -24,12 +25,11 @@ var (
 
 type Operation struct {
 	avax.Asset `serialize:"true"`
-	UTXOIDs    []*avax.UTXOID `serialize:"true" json:"inputIDs"`
-	FxID       ids.ID         `serialize:"false" json:"fxID"`
-	Op         FxOperation    `serialize:"true" json:"operation"`
+	UTXOIDs    []*avax.UTXOID  `serialize:"true" json:"inputIDs"`
+	FxID       ids.ID          `serialize:"false" json:"fxID"`
+	Op         fxs.FxOperation `serialize:"true" json:"operation"`
 }
 
-// Verify implements the verify.Verifiable interface
 func (op *Operation) Verify(c codec.Manager) error {
 	switch {
 	case op == nil:
@@ -65,7 +65,7 @@ func (ops *innerSortOperation) Less(i, j int) bool {
 func (ops *innerSortOperation) Len() int      { return len(ops.ops) }
 func (ops *innerSortOperation) Swap(i, j int) { o := ops.ops; o[j], o[i] = o[i], o[j] }
 
-func sortOperations(ops []*Operation, c codec.Manager) {
+func SortOperations(ops []*Operation, c codec.Manager) {
 	sort.Sort(&innerSortOperation{ops: ops, codec: c})
 }
 

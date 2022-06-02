@@ -13,14 +13,13 @@ import (
 
 	"github.com/ava-labs/avalanchego/codec"
 	"github.com/ava-labs/avalanchego/codec/linearcodec"
-	"github.com/ava-labs/avalanchego/codec/reflectcodec"
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/utils/constants"
 	"github.com/ava-labs/avalanchego/utils/formatting"
+	"github.com/ava-labs/avalanchego/utils/formatting/address"
 	"github.com/ava-labs/avalanchego/utils/json"
 	"github.com/ava-labs/avalanchego/utils/wrappers"
 	"github.com/ava-labs/avalanchego/vms/avm"
-	"github.com/ava-labs/avalanchego/vms/evm"
 	"github.com/ava-labs/avalanchego/vms/nftfx"
 	"github.com/ava-labs/avalanchego/vms/platformvm"
 	"github.com/ava-labs/avalanchego/vms/propertyfx"
@@ -63,7 +62,7 @@ func validateInitialStakedFunds(config *Config) error {
 
 	for _, staker := range config.InitialStakedFunds {
 		if initialStakedFundsSet.Contains(staker) {
-			avaxAddr, err := formatting.FormatAddress(
+			avaxAddr, err := address.Format(
 				configChainIDAlias,
 				constants.GetHRP(config.NetworkID),
 				staker.Bytes(),
@@ -83,7 +82,7 @@ func validateInitialStakedFunds(config *Config) error {
 		initialStakedFundsSet.Add(staker)
 
 		if !allocationSet.Contains(staker) {
-			avaxAddr, err := formatting.FormatAddress(
+			avaxAddr, err := address.Format(
 				configChainIDAlias,
 				constants.GetHRP(config.NetworkID),
 				staker.Bytes(),
@@ -278,7 +277,7 @@ func FromConfig(config *Config) ([]byte, ids.ID, error) {
 		sortXAllocation(xAllocations)
 
 		for _, allocation := range xAllocations {
-			addr, err := formatting.FormatBech32(hrp, allocation.AVAXAddr.Bytes())
+			addr, err := address.FormatBech32(hrp, allocation.AVAXAddr.Bytes())
 			if err != nil {
 				return nil, ids.ID{}, err
 			}
@@ -341,7 +340,7 @@ func FromConfig(config *Config) ([]byte, ids.ID, error) {
 			skippedAllocations = append(skippedAllocations, allocation)
 			continue
 		}
-		addr, err := formatting.FormatBech32(hrp, allocation.AVAXAddr.Bytes())
+		addr, err := address.FormatBech32(hrp, allocation.AVAXAddr.Bytes())
 		if err != nil {
 			return nil, ids.ID{}, err
 		}
@@ -372,14 +371,14 @@ func FromConfig(config *Config) ([]byte, ids.ID, error) {
 		endStakingTime := endStakingTime.Add(-stakingOffset)
 		stakingOffset += time.Duration(config.InitialStakeDurationOffset) * time.Second
 
-		destAddrStr, err := formatting.FormatBech32(hrp, staker.RewardAddress.Bytes())
+		destAddrStr, err := address.FormatBech32(hrp, staker.RewardAddress.Bytes())
 		if err != nil {
 			return nil, ids.ID{}, err
 		}
 
 		utxos := []platformvm.APIUTXO(nil)
 		for _, allocation := range nodeAllocations {
-			addr, err := formatting.FormatBech32(hrp, allocation.AVAXAddr.Bytes())
+			addr, err := address.FormatBech32(hrp, allocation.AVAXAddr.Bytes())
 			if err != nil {
 				return nil, ids.ID{}, err
 			}
@@ -405,7 +404,7 @@ func FromConfig(config *Config) ([]byte, ids.ID, error) {
 				APIStaker: platformvm.APIStaker{
 					StartTime: json.Uint64(genesisTime.Unix()),
 					EndTime:   json.Uint64(endStakingTime.Unix()),
-					NodeID:    staker.NodeID.PrefixedString(constants.NodeIDPrefix),
+					NodeID:    staker.NodeID,
 				},
 				RewardOwner: &platformvm.APIOwner{
 					Threshold: 1,
@@ -426,7 +425,7 @@ func FromConfig(config *Config) ([]byte, ids.ID, error) {
 		{
 			GenesisData: avmReply.Bytes,
 			SubnetID:    constants.PrimaryNetworkID,
-			VMID:        avm.ID,
+			VMID:        constants.AVMID,
 			FxIDs: []ids.ID{
 				secp256k1fx.ID,
 				nftfx.ID,
@@ -437,7 +436,7 @@ func FromConfig(config *Config) ([]byte, ids.ID, error) {
 		{
 			GenesisData: genesisStr,
 			SubnetID:    constants.PrimaryNetworkID,
-			VMID:        evm.ID,
+			VMID:        constants.EVMID,
 			Name:        "C-Chain",
 		},
 	}
@@ -537,7 +536,7 @@ func VMGenesis(genesisBytes []byte, vmID ids.ID) (*platformvm.Tx, error) {
 }
 
 func AVAXAssetID(avmGenesisBytes []byte) (ids.ID, error) {
-	c := linearcodec.New(reflectcodec.DefaultTagName, 1<<20)
+	c := linearcodec.NewCustomMaxLength(1 << 20)
 	m := codec.NewManager(math.MaxInt32)
 	errs := wrappers.Errs{}
 	errs.Add(

@@ -12,6 +12,7 @@ import (
 	"github.com/ava-labs/avalanchego/chains"
 	"github.com/ava-labs/avalanchego/database/manager"
 	"github.com/ava-labs/avalanchego/ids"
+	"github.com/ava-labs/avalanchego/snow"
 	"github.com/ava-labs/avalanchego/snow/engine/common"
 	"github.com/ava-labs/avalanchego/snow/uptime"
 	"github.com/ava-labs/avalanchego/snow/validators"
@@ -20,6 +21,7 @@ import (
 	"github.com/ava-labs/avalanchego/utils/math"
 	"github.com/ava-labs/avalanchego/version"
 	"github.com/ava-labs/avalanchego/vms/components/avax"
+	"github.com/ava-labs/avalanchego/vms/platformvm/config"
 	"github.com/ava-labs/avalanchego/vms/platformvm/reward"
 	"github.com/ava-labs/avalanchego/vms/platformvm/status"
 	"github.com/ava-labs/avalanchego/vms/secp256k1fx"
@@ -200,7 +202,7 @@ func TestRewardDelegatorTxExecuteOnCommit(t *testing.T) {
 
 	vdrStartTime := uint64(defaultValidateStartTime.Unix()) + 1
 	vdrEndTime := uint64(defaultValidateStartTime.Add(2 * defaultMinStakingDuration).Unix())
-	vdrNodeID := ids.GenerateTestShortID()
+	vdrNodeID := ids.GenerateTestNodeID()
 	vdrTx, err := vm.newAddValidatorTx(
 		vm.MinValidatorStake, // stakeAmt
 		vdrStartTime,
@@ -305,7 +307,7 @@ func TestRewardDelegatorTxExecuteOnAbort(t *testing.T) {
 
 	vdrStartTime := uint64(defaultValidateStartTime.Unix()) + 1
 	vdrEndTime := uint64(defaultValidateStartTime.Add(2 * defaultMinStakingDuration).Unix())
-	vdrNodeID := ids.GenerateTestShortID()
+	vdrNodeID := ids.GenerateTestNodeID()
 	vdrTx, err := vm.newAddValidatorTx(
 		vm.MinValidatorStake, // stakeAmt
 		vdrStartTime,
@@ -386,11 +388,13 @@ func TestUptimeDisallowedWithRestart(t *testing.T) {
 
 	firstDB := db.NewPrefixDBManager([]byte{})
 	firstVM := &VM{Factory: Factory{
-		Chains:                 chains.MockManager{},
-		UptimePercentage:       .2,
-		RewardConfig:           defaultRewardConfig,
-		Validators:             validators.NewManager(),
-		UptimeLockedCalculator: uptime.NewLockedCalculator(),
+		Config: config.Config{
+			Chains:                 chains.MockManager{},
+			UptimePercentage:       .2,
+			RewardConfig:           defaultRewardConfig,
+			Validators:             validators.NewManager(),
+			UptimeLockedCalculator: uptime.NewLockedCalculator(),
+		},
 	}}
 
 	firstCtx := defaultContext()
@@ -404,11 +408,11 @@ func TestUptimeDisallowedWithRestart(t *testing.T) {
 	firstVM.clock.Set(defaultGenesisTime)
 	firstVM.uptimeManager.(uptime.TestManager).SetTime(defaultGenesisTime)
 
-	if err := firstVM.Bootstrapping(); err != nil {
+	if err := firstVM.SetState(snow.Bootstrapping); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := firstVM.Bootstrapped(); err != nil {
+	if err := firstVM.SetState(snow.NormalOp); err != nil {
 		t.Fatal(err)
 	}
 
@@ -422,10 +426,12 @@ func TestUptimeDisallowedWithRestart(t *testing.T) {
 
 	secondDB := db.NewPrefixDBManager([]byte{})
 	secondVM := &VM{Factory: Factory{
-		Chains:                 chains.MockManager{},
-		UptimePercentage:       .21,
-		Validators:             validators.NewManager(),
-		UptimeLockedCalculator: uptime.NewLockedCalculator(),
+		Config: config.Config{
+			Chains:                 chains.MockManager{},
+			UptimePercentage:       .21,
+			Validators:             validators.NewManager(),
+			UptimeLockedCalculator: uptime.NewLockedCalculator(),
+		},
 	}}
 
 	secondCtx := defaultContext()
@@ -445,11 +451,11 @@ func TestUptimeDisallowedWithRestart(t *testing.T) {
 	secondVM.clock.Set(defaultValidateStartTime.Add(2 * defaultMinStakingDuration))
 	secondVM.uptimeManager.(uptime.TestManager).SetTime(defaultValidateStartTime.Add(2 * defaultMinStakingDuration))
 
-	if err := secondVM.Bootstrapping(); err != nil {
+	if err := secondVM.SetState(snow.Bootstrapping); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := secondVM.Bootstrapped(); err != nil {
+	if err := secondVM.SetState(snow.NormalOp); err != nil {
 		t.Fatal(err)
 	}
 
@@ -573,7 +579,7 @@ func TestUptimeDisallowedWithRestart(t *testing.T) {
 	}
 
 	currentStakers := secondVM.internalState.CurrentStakerChainState()
-	_, err = currentStakers.GetValidator(keys[1].PublicKey().Address())
+	_, err = currentStakers.GetValidator(ids.NodeID(keys[1].PublicKey().Address()))
 	if err == nil {
 		t.Fatal("should have removed a genesis validator")
 	}
@@ -584,18 +590,20 @@ func TestUptimeDisallowedAfterNeverConnecting(t *testing.T) {
 	db := manager.NewMemDB(version.DefaultVersion1_0_0)
 
 	vm := &VM{Factory: Factory{
-		Chains:                 chains.MockManager{},
-		UptimePercentage:       .2,
-		RewardConfig:           defaultRewardConfig,
-		Validators:             validators.NewManager(),
-		UptimeLockedCalculator: uptime.NewLockedCalculator(),
+		Config: config.Config{
+			Chains:                 chains.MockManager{},
+			UptimePercentage:       .2,
+			RewardConfig:           defaultRewardConfig,
+			Validators:             validators.NewManager(),
+			UptimeLockedCalculator: uptime.NewLockedCalculator(),
+		},
 	}}
 
 	ctx := defaultContext()
 	ctx.Lock.Lock()
 
 	msgChan := make(chan common.Message, 1)
-	appSender := &common.SenderTest{}
+	appSender := &common.SenderTest{T: t}
 	if err := vm.Initialize(ctx, db, genesisBytes, nil, nil, msgChan, nil, appSender); err != nil {
 		t.Fatal(err)
 	}
@@ -609,11 +617,11 @@ func TestUptimeDisallowedAfterNeverConnecting(t *testing.T) {
 	vm.clock.Set(defaultGenesisTime)
 	vm.uptimeManager.(uptime.TestManager).SetTime(defaultGenesisTime)
 
-	if err := vm.Bootstrapping(); err != nil {
+	if err := vm.SetState(snow.Bootstrapping); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := vm.Bootstrapped(); err != nil {
+	if err := vm.SetState(snow.NormalOp); err != nil {
 		t.Fatal(err)
 	}
 
@@ -705,7 +713,7 @@ func TestUptimeDisallowedAfterNeverConnecting(t *testing.T) {
 	}
 
 	currentStakers := vm.internalState.CurrentStakerChainState()
-	_, err = currentStakers.GetValidator(keys[1].PublicKey().Address())
+	_, err = currentStakers.GetValidator(ids.NodeID(keys[1].PublicKey().Address()))
 	if err == nil {
 		t.Fatal("should have removed a genesis validator")
 	}

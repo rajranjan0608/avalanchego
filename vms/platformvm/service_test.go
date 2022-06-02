@@ -8,9 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/golang/mock/gomock"
 
 	"github.com/stretchr/testify/assert"
 
@@ -25,7 +26,6 @@ import (
 	"github.com/ava-labs/avalanchego/utils/formatting"
 	"github.com/ava-labs/avalanchego/utils/logging"
 	"github.com/ava-labs/avalanchego/version"
-	"github.com/ava-labs/avalanchego/vms/avm"
 	"github.com/ava-labs/avalanchego/vms/components/avax"
 	"github.com/ava-labs/avalanchego/vms/platformvm/status"
 	"github.com/ava-labs/avalanchego/vms/secp256k1fx"
@@ -52,6 +52,10 @@ var (
 	// 3cb7d3842e8cee6a0ebd09f1fe884f6861e1b29c
 	// Platform address resulting from the above private key
 	testAddress = "P-testing18jma8ppw3nhx5r4ap8clazz0dps7rv5umpc36y"
+
+	encodings = []formatting.Encoding{
+		formatting.JSON, formatting.Hex, formatting.CB58,
+	}
 )
 
 func defaultService(t *testing.T) *Service {
@@ -85,7 +89,7 @@ func defaultAddress(t *testing.T, service *Service) {
 }
 
 func TestAddValidator(t *testing.T) {
-	expectedJSONString := `{"username":"","password":"","from":null,"changeAddr":"","txID":"11111111111111111111111111111111LpoYY","startTime":"0","endTime":"0","nodeID":"","rewardAddress":"","delegationFeeRate":"0.0000"}`
+	expectedJSONString := `{"username":"","password":"","from":null,"changeAddr":"","txID":"11111111111111111111111111111111LpoYY","startTime":"0","endTime":"0","nodeID":"NodeID-111111111111111111116DBWJs","rewardAddress":"","delegationFeeRate":"0.0000"}`
 	args := AddValidatorArgs{}
 	bytes, err := json.Marshal(&args)
 	if err != nil {
@@ -132,16 +136,8 @@ func TestExportKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !strings.HasPrefix(reply.PrivateKey, constants.SecretKeyPrefix) {
-		t.Fatalf("ExportKeyReply is missing secret key prefix: %s", constants.SecretKeyPrefix)
-	}
-	privateKeyString := strings.TrimPrefix(reply.PrivateKey, constants.SecretKeyPrefix)
-	privKeyBytes, err := formatting.Decode(formatting.CB58, privateKeyString)
-	if err != nil {
-		t.Fatalf("Failed to parse key: %s", err)
-	}
-	if !bytes.Equal(testPrivateKey, privKeyBytes) {
-		t.Fatalf("Expected %v, got %v", testPrivateKey, privKeyBytes)
+	if !bytes.Equal(testPrivateKey, reply.PrivateKey.Bytes()) {
+		t.Fatalf("Expected %v, got %v", testPrivateKey, reply.PrivateKey.Bytes())
 	}
 }
 
@@ -300,29 +296,19 @@ func TestGetTxStatus(t *testing.T) {
 
 // Test issuing and then retrieving a transaction
 func TestGetTx(t *testing.T) {
-	service := defaultService(t)
-	defaultAddress(t, service)
-	service.vm.ctx.Lock.Lock()
-	defer func() {
-		if err := service.vm.Shutdown(); err != nil {
-			t.Fatal(err)
-		}
-		service.vm.ctx.Lock.Unlock()
-	}()
-
 	type test struct {
 		description string
-		createTx    func() (*Tx, error)
+		createTx    func(service *Service) (*Tx, error)
 	}
 
 	tests := []test{
 		{
 			"standard block",
-			func() (*Tx, error) {
+			func(service *Service) (*Tx, error) {
 				return service.vm.newCreateChainTx( // Test GetTx works for standard blocks
 					testSubnet1.ID(),
 					nil,
-					avm.ID,
+					constants.AVMID,
 					nil,
 					"chain name",
 					[]*crypto.PrivateKeySECP256K1R{testSubnet1ControlKeys[0], testSubnet1ControlKeys[1]},
@@ -332,12 +318,12 @@ func TestGetTx(t *testing.T) {
 		},
 		{
 			"proposal block",
-			func() (*Tx, error) {
+			func(service *Service) (*Tx, error) {
 				return service.vm.newAddValidatorTx( // Test GetTx works for proposal blocks
 					service.vm.MinValidatorStake,
 					uint64(service.vm.clock.Time().Add(syncBound).Unix()),
 					uint64(service.vm.clock.Time().Add(syncBound).Add(defaultMinStakingDuration).Unix()),
-					ids.GenerateTestShortID(),
+					ids.GenerateTestNodeID(),
 					ids.GenerateTestShortID(),
 					0,
 					[]*crypto.PrivateKeySECP256K1R{keys[0]},
@@ -347,7 +333,7 @@ func TestGetTx(t *testing.T) {
 		},
 		{
 			"atomic block",
-			func() (*Tx, error) {
+			func(service *Service) (*Tx, error) {
 				return service.vm.newExportTx( // Test GetTx works for proposal blocks
 					100,
 					service.vm.ctx.XChainID,
@@ -360,45 +346,64 @@ func TestGetTx(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		tx, err := test.createTx()
-		if err != nil {
-			t.Fatalf("failed test '%s': %s", test.description, err)
-		}
-		arg := &api.GetTxArgs{
-			TxID:     tx.ID(),
-			Encoding: formatting.CB58,
-		}
-		var response api.FormattedTx
-		if err := service.GetTx(nil, arg, &response); err == nil {
-			t.Fatalf("failed test '%s': haven't issued tx yet so shouldn't be able to get it", test.description)
-		} else if err := service.vm.blockBuilder.AddUnverifiedTx(tx); err != nil {
-			t.Fatalf("failed test '%s': %s", test.description, err)
-		} else if block, err := service.vm.BuildBlock(); err != nil {
-			t.Fatalf("failed test '%s': %s", test.description, err)
-		} else if err := block.Verify(); err != nil {
-			t.Fatalf("failed test '%s': %s", test.description, err)
-		} else if err := block.Accept(); err != nil {
-			t.Fatalf("failed test '%s': %s", test.description, err)
-		} else if blk, ok := block.(*ProposalBlock); ok { // For proposal blocks, commit them
-			if options, err := blk.Options(); err != nil {
-				t.Fatalf("failed test '%s': %s", test.description, err)
-			} else if commit, ok := options[0].(*CommitBlock); !ok {
-				t.Fatalf("failed test '%s': should prefer to commit", test.description)
-			} else if err := commit.Verify(); err != nil {
-				t.Fatalf("failed test '%s': %s", test.description, err)
-			} else if err := commit.Accept(); err != nil {
-				t.Fatalf("failed test '%s': %s", test.description, err)
-			}
-		} else if err := service.GetTx(nil, arg, &response); err != nil {
-			t.Fatalf("failed test '%s': %s", test.description, err)
-		} else {
-			responseTxBytes, err := formatting.Decode(response.Encoding, response.Tx)
+		for _, encoding := range encodings {
+			service := defaultService(t)
+			defaultAddress(t, service)
+			service.vm.ctx.Lock.Lock()
+
+			tx, err := test.createTx(service)
 			if err != nil {
-				t.Fatalf("failed test '%s': %s", test.description, err)
+				t.Fatalf("failed test '%s - %s': %s", test.description, encoding.String(), err)
 			}
-			if !bytes.Equal(responseTxBytes, tx.Bytes()) {
-				t.Fatalf("failed test '%s': byte representation of tx in response is incorrect", test.description)
+			arg := &api.GetTxArgs{
+				TxID:     tx.ID(),
+				Encoding: encoding,
 			}
+			var response api.GetTxReply
+			if err := service.GetTx(nil, arg, &response); err == nil {
+				t.Fatalf("failed test '%s - %s': haven't issued tx yet so shouldn't be able to get it", test.description, encoding.String())
+			} else if err := service.vm.blockBuilder.AddUnverifiedTx(tx); err != nil {
+				t.Fatalf("failed test '%s - %s': %s", test.description, encoding.String(), err)
+			} else if block, err := service.vm.BuildBlock(); err != nil {
+				t.Fatalf("failed test '%s - %s': %s", test.description, encoding.String(), err)
+			} else if err := block.Verify(); err != nil {
+				t.Fatalf("failed test '%s - %s': %s", test.description, encoding.String(), err)
+			} else if err := block.Accept(); err != nil {
+				t.Fatalf("failed test '%s - %s': %s", test.description, encoding.String(), err)
+			} else if blk, ok := block.(*ProposalBlock); ok { // For proposal blocks, commit them
+				if options, err := blk.Options(); err != nil {
+					t.Fatalf("failed test '%s - %s': %s", test.description, encoding.String(), err)
+				} else if commit, ok := options[0].(*CommitBlock); !ok {
+					t.Fatalf("failed test '%s - %s': should prefer to commit", test.description, encoding.String())
+				} else if err := commit.Verify(); err != nil {
+					t.Fatalf("failed test '%s - %s': %s", test.description, encoding.String(), err)
+				} else if err := commit.Accept(); err != nil {
+					t.Fatalf("failed test '%s - %s': %s", test.description, encoding.String(), err)
+				}
+			} else if err := service.GetTx(nil, arg, &response); err != nil {
+				t.Fatalf("failed test '%s - %s': %s", test.description, encoding.String(), err)
+			} else {
+				switch encoding {
+				case formatting.Hex, formatting.CB58:
+					// we're always guaranteed a string for hex/cb58 encodings.
+					responseTxBytes, err := formatting.Decode(response.Encoding, response.Tx.(string))
+					if err != nil {
+						t.Fatalf("failed test '%s - %s': %s", test.description, encoding.String(), err)
+					}
+					if !bytes.Equal(responseTxBytes, tx.Bytes()) {
+						t.Fatalf("failed test '%s - %s': byte representation of tx in response is incorrect", test.description, encoding.String())
+					}
+				case formatting.JSON:
+					if response.Tx != tx {
+						t.Fatalf("failed test '%s - %s': byte representation of tx in response is incorrect", test.description, encoding.String())
+					}
+				}
+			}
+
+			if err := service.vm.Shutdown(); err != nil {
+				t.Fatal(err)
+			}
+			service.vm.ctx.Lock.Unlock()
 		}
 	}
 }
@@ -516,7 +521,7 @@ func TestGetStake(t *testing.T) {
 
 	// Add a delegator
 	stakeAmt := service.vm.MinDelegatorStake + 12345
-	delegatorNodeID := keys[0].PublicKey().Address()
+	delegatorNodeID := ids.NodeID(keys[0].PublicKey().Address())
 	delegatorEndTime := uint64(defaultGenesisTime.Add(defaultMinStakingDuration).Unix())
 	tx, err := service.vm.newAddDelegatorTx(
 		stakeAmt,
@@ -559,7 +564,7 @@ func TestGetStake(t *testing.T) {
 	// Make sure this works for pending stakers
 	// Add a pending staker
 	stakeAmt = service.vm.MinValidatorStake + 54321
-	pendingStakerNodeID := ids.GenerateTestShortID()
+	pendingStakerNodeID := ids.GenerateTestNodeID()
 	pendingStakerEndTime := uint64(defaultGenesisTime.Add(defaultMinStakingDuration).Unix())
 	tx, err = service.vm.newAddValidatorTx(
 		stakeAmt,
@@ -660,7 +665,7 @@ func TestGetCurrentValidators(t *testing.T) {
 
 	// Add a delegator
 	stakeAmt := service.vm.MinDelegatorStake + 12345
-	validatorNodeID := keys[1].PublicKey().Address()
+	validatorNodeID := ids.NodeID(keys[1].PublicKey().Address())
 	delegatorStartTime := uint64(defaultValidateStartTime.Unix())
 	delegatorEndTime := uint64(defaultValidateStartTime.Add(defaultMinStakingDuration).Unix())
 
@@ -702,7 +707,7 @@ func TestGetCurrentValidators(t *testing.T) {
 	found := false
 	for i := 0; i < len(response.Validators) && !found; i++ {
 		vdr := response.Validators[i].(APIPrimaryValidator)
-		if vdr.NodeID != validatorNodeID.PrefixedString(constants.NodeIDPrefix) {
+		if vdr.NodeID != validatorNodeID {
 			continue
 		}
 		found = true
@@ -751,4 +756,60 @@ func TestGetTimestamp(t *testing.T) {
 	assert.NoError(err)
 
 	assert.Equal(newTimestamp, reply.Timestamp)
+}
+
+func TestGetBlock(t *testing.T) {
+	tests := []struct {
+		name     string
+		encoding formatting.Encoding
+	}{
+		{
+			name:     "json",
+			encoding: formatting.JSON,
+		},
+		{
+			name:     "cb58",
+			encoding: formatting.CB58,
+		},
+		{
+			name:     "hex",
+			encoding: formatting.Hex,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			service := defaultService(t)
+
+			block, err := service.vm.newStandardBlock(ids.GenerateTestID(), 1234, nil)
+			if err != nil {
+				t.Fatal("couldn't create block: %w", err)
+			}
+			internalState := NewMockInternalState(ctrl)
+			internalState.EXPECT().GetBlock(block.ID()).Times(1).Return(block, nil)
+
+			service.vm.internalState = internalState
+
+			args := api.GetBlockArgs{
+				BlockID:  block.ID(),
+				Encoding: test.encoding,
+			}
+			response := api.GetBlockResponse{}
+			err = service.GetBlock(nil, &args, &response)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			switch {
+			case test.encoding == formatting.JSON:
+				assert.Equal(t, block, response.Block)
+			default:
+				decoded, _ := formatting.Decode(response.Encoding, response.Block.(string))
+				assert.Equal(t, block.Bytes(), decoded)
+			}
+
+			assert.Equal(t, test.encoding, response.Encoding)
+		})
+	}
 }

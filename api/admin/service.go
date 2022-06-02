@@ -18,6 +18,8 @@ import (
 	"github.com/ava-labs/avalanchego/utils/logging"
 	"github.com/ava-labs/avalanchego/utils/perms"
 	"github.com/ava-labs/avalanchego/utils/profiler"
+	"github.com/ava-labs/avalanchego/vms"
+	"github.com/ava-labs/avalanchego/vms/registry"
 
 	cjson "github.com/ava-labs/avalanchego/utils/json"
 )
@@ -40,7 +42,9 @@ type Config struct {
 	LogFactory   logging.Factory
 	NodeConfig   interface{}
 	ChainManager chains.Manager
-	HTTPServer   *server.Server
+	HTTPServer   server.PathAdderWithReadLock
+	VMRegistry   registry.VMRegistry
+	VMManager    vms.Manager
 }
 
 // Admin is the API service for node admin management
@@ -189,7 +193,7 @@ type SetLoggerLevelArgs struct {
 // If args.DisplayLevel == nil, doesn't set the display level of these loggers.
 // If args.DisplayLevel != nil, must be a valid string representation of a log level.
 func (service *Admin) SetLoggerLevel(_ *http.Request, args *SetLoggerLevelArgs, reply *api.SuccessResponse) error {
-	service.Log.Debug("Admin: SetLogLevels called with LoggerName: %q, LogLevel: %q, DisplayLevel: %q", args.LoggerName, args.LogLevel, args.DisplayLevel)
+	service.Log.Debug("Admin: SetLoggerLevel called with LoggerName: %q, LogLevel: %q, DisplayLevel: %q", args.LoggerName, args.LogLevel, args.DisplayLevel)
 
 	if args.LogLevel == nil && args.DisplayLevel == nil {
 		return errNoLogLevel
@@ -268,4 +272,32 @@ func (service *Admin) GetConfig(_ *http.Request, args *struct{}, reply *interfac
 	service.Log.Debug("Admin: GetConfig called")
 	*reply = service.NodeConfig
 	return nil
+}
+
+// LoadVMsReply contains the response metadata for LoadVMs
+type LoadVMsReply struct {
+	// VMs and their aliases which were successfully loaded
+	NewVMs map[ids.ID][]string `json:"newVMs"`
+	// VMs that failed to be loaded and the error message
+	FailedVMs map[ids.ID]string `json:"failedVMs,omitempty"`
+}
+
+// LoadVMs loads any new VMs available to the node and returns the added VMs.
+func (service *Admin) LoadVMs(_ *http.Request, _ *struct{}, reply *LoadVMsReply) error {
+	service.Log.Debug("Admin: LoadVMs called")
+
+	loadedVMs, failedVMs, err := service.VMRegistry.ReloadWithReadLock()
+	if err != nil {
+		return err
+	}
+
+	// extract the inner error messages
+	failedVMsParsed := make(map[ids.ID]string)
+	for vmID, err := range failedVMs {
+		failedVMsParsed[vmID] = err.Error()
+	}
+
+	reply.FailedVMs = failedVMsParsed
+	reply.NewVMs, err = ids.GetRelevantAliases(service.VMManager, loadedVMs)
+	return err
 }

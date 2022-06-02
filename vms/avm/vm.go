@@ -40,6 +40,7 @@ import (
 
 	cjson "github.com/ava-labs/avalanchego/utils/json"
 	safemath "github.com/ava-labs/avalanchego/utils/math"
+	extensions "github.com/ava-labs/avalanchego/vms/avm/fxs"
 )
 
 const (
@@ -58,7 +59,6 @@ var (
 	_ vertex.DAGVM = &VM{}
 )
 
-// VM implements the avalanche.DAGVM interface
 type VM struct {
 	Factory
 	metrics
@@ -99,18 +99,18 @@ type VM struct {
 	db     *versiondb.Database
 
 	typeToFxIndex map[reflect.Type]int
-	fxs           []*parsedFx
+	fxs           []*extensions.ParsedFx
 
 	walletService WalletService
 
 	addressTxsIndexer index.AddressTxsIndexer
 }
 
-func (vm *VM) Connected(nodeID ids.ShortID, nodeVersion version.Application) error {
+func (vm *VM) Connected(nodeID ids.NodeID, nodeVersion version.Application) error {
 	return nil
 }
 
-func (vm *VM) Disconnected(nodeID ids.ShortID) error {
+func (vm *VM) Disconnected(nodeID ids.NodeID) error {
 	return nil
 }
 
@@ -125,7 +125,6 @@ type Config struct {
 	IndexAllowIncomplete bool `json:"index-allow-incomplete"`
 }
 
-// Initialize implements the avalanche.DAGVM interface
 func (vm *VM) Initialize(
 	ctx *snow.Context,
 	dbManager manager.Manager,
@@ -165,18 +164,18 @@ func (vm *VM) Initialize(
 
 	vm.pubsub = pubsub.New(ctx.NetworkID, ctx.Log)
 
-	typedFxs := make([]Fx, len(fxs))
-	vm.fxs = make([]*parsedFx, len(fxs))
+	typedFxs := make([]extensions.Fx, len(fxs))
+	vm.fxs = make([]*extensions.ParsedFx, len(fxs))
 	for i, fxContainer := range fxs {
 		if fxContainer == nil {
 			return errIncompatibleFx
 		}
-		fx, ok := fxContainer.Fx.(Fx)
+		fx, ok := fxContainer.Fx.(extensions.Fx)
 		if !ok {
 			return errIncompatibleFx
 		}
 		typedFxs[i] = fx
-		vm.fxs[i] = &parsedFx{
+		vm.fxs[i] = &extensions.ParsedFx{
 			ID: fxContainer.ID,
 			Fx: fx,
 		}
@@ -195,7 +194,14 @@ func (vm *VM) Initialize(
 
 	vm.AtomicUTXOManager = avax.NewAtomicUTXOManager(ctx.SharedMemory, vm.codec)
 
-	state, err := NewMeteredState(vm.db, vm.genesisCodec, vm.codec, registerer)
+	state, err := NewState(
+		StateConfig{
+			DB:           vm.db,
+			GenesisCodec: vm.genesisCodec,
+			Codec:        vm.codec,
+			Metrics:      registerer,
+		},
+	)
 	if err != nil {
 		return err
 	}
@@ -235,9 +241,8 @@ func (vm *VM) Initialize(
 	return vm.db.Commit()
 }
 
-// Bootstrapping is called by the consensus engine when it starts bootstrapping
-// this chain
-func (vm *VM) Bootstrapping() error {
+// onBootstrapStarted is called by the consensus engine when it starts bootstrapping this chain
+func (vm *VM) onBootstrapStarted() error {
 	for _, fx := range vm.fxs {
 		if err := fx.Fx.Bootstrapping(); err != nil {
 			return err
@@ -246,9 +251,7 @@ func (vm *VM) Bootstrapping() error {
 	return nil
 }
 
-// Bootstrapped is called by the consensus engine when it is done bootstrapping
-// this chain
-func (vm *VM) Bootstrapped() error {
+func (vm *VM) onNormalOperationsStarted() error {
 	for _, fx := range vm.fxs {
 		if err := fx.Fx.Bootstrapped(); err != nil {
 			return err
@@ -258,7 +261,17 @@ func (vm *VM) Bootstrapped() error {
 	return nil
 }
 
-// Shutdown implements the avalanche.DAGVM interface
+func (vm *VM) SetState(state snow.State) error {
+	switch state {
+	case snow.Bootstrapping:
+		return vm.onBootstrapStarted()
+	case snow.NormalOp:
+		return vm.onNormalOperationsStarted()
+	default:
+		return snow.ErrUnknownState
+	}
+}
+
 func (vm *VM) Shutdown() error {
 	if vm.timer == nil {
 		return nil
@@ -273,12 +286,10 @@ func (vm *VM) Shutdown() error {
 	return vm.baseDB.Close()
 }
 
-// Get implements the avalanche.DAGVM interface
 func (vm *VM) Version() (string, error) {
 	return version.Current.String(), nil
 }
 
-// CreateHandlers implements the avalanche.DAGVM interface
 func (vm *VM) CreateHandlers() (map[string]*common.HTTPHandler, error) {
 	codec := cjson.NewCodec()
 
@@ -307,7 +318,6 @@ func (vm *VM) CreateHandlers() (map[string]*common.HTTPHandler, error) {
 	}, err
 }
 
-// CreateStaticHandlers implements the common.StaticVM interface
 func (vm *VM) CreateStaticHandlers() (map[string]*common.HTTPHandler, error) {
 	newServer := rpc.NewServer()
 	codec := cjson.NewCodec()
@@ -321,7 +331,6 @@ func (vm *VM) CreateStaticHandlers() (map[string]*common.HTTPHandler, error) {
 	}, newServer.RegisterService(staticService, "avm")
 }
 
-// Pending implements the avalanche.DAGVM interface
 func (vm *VM) PendingTxs() []snowstorm.Tx {
 	vm.timer.Cancel()
 
@@ -330,12 +339,10 @@ func (vm *VM) PendingTxs() []snowstorm.Tx {
 	return txs
 }
 
-// Parse implements the avalanche.DAGVM interface
 func (vm *VM) ParseTx(b []byte) (snowstorm.Tx, error) {
 	return vm.parseTx(b)
 }
 
-// Get implements the avalanche.DAGVM interface
 func (vm *VM) GetTx(txID ids.ID) (snowstorm.Tx, error) {
 	tx := &UniqueTx{
 		vm:   vm,
@@ -369,6 +376,15 @@ func (vm *VM) IssueTx(b []byte) (ids.ID, error) {
 	}
 	vm.issueTx(tx)
 	return tx.ID(), nil
+}
+
+func (vm *VM) issueStopVertex() error {
+	select {
+	case vm.toEngine <- common.StopVertex:
+	default:
+		vm.ctx.Log.Debug("dropping common.StopVertex message to engine due to contention")
+	}
+	return nil
 }
 
 /*
@@ -554,7 +570,7 @@ func (vm *VM) getFx(val interface{}) (int, error) {
 
 // getParsedFx returns the parsedFx object for a given TransferableInput
 // or TransferableOutput object
-func (vm *VM) getParsedFx(val interface{}) (*parsedFx, error) {
+func (vm *VM) getParsedFx(val interface{}) (*extensions.ParsedFx, error) {
 	idx, err := vm.getFx(val)
 	if err != nil {
 		return nil, err
@@ -1027,7 +1043,7 @@ func (vm *VM) selectChangeAddr(defaultAddr ids.ShortID, changeAddr string) (ids.
 	if changeAddr == "" {
 		return defaultAddr, nil
 	}
-	addr, err := vm.ParseLocalAddress(changeAddr)
+	addr, err := avax.ParseServiceAddress(vm, changeAddr)
 	if err != nil {
 		return ids.ShortID{}, fmt.Errorf("couldn't parse changeAddr: %w", err)
 	}
@@ -1047,21 +1063,21 @@ func (vm *VM) lookupAssetID(asset string) (ids.ID, error) {
 }
 
 // This VM doesn't (currently) have any app-specific messages
-func (vm *VM) AppRequest(nodeID ids.ShortID, requestID uint32, deadline time.Time, request []byte) error {
+func (vm *VM) AppRequest(nodeID ids.NodeID, requestID uint32, deadline time.Time, request []byte) error {
 	return nil
 }
 
 // This VM doesn't (currently) have any app-specific messages
-func (vm *VM) AppResponse(nodeID ids.ShortID, requestID uint32, response []byte) error {
+func (vm *VM) AppResponse(nodeID ids.NodeID, requestID uint32, response []byte) error {
 	return nil
 }
 
 // This VM doesn't (currently) have any app-specific messages
-func (vm *VM) AppRequestFailed(nodeID ids.ShortID, requestID uint32) error {
+func (vm *VM) AppRequestFailed(nodeID ids.NodeID, requestID uint32) error {
 	return nil
 }
 
 // This VM doesn't (currently) have any app-specific messages
-func (vm *VM) AppGossip(nodeID ids.ShortID, msg []byte) error {
+func (vm *VM) AppGossip(nodeID ids.NodeID, msg []byte) error {
 	return nil
 }

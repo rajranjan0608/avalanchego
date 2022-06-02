@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/ava-labs/avalanchego/ids"
-	"github.com/ava-labs/avalanchego/utils"
+	"github.com/ava-labs/avalanchego/utils/ips"
 	"github.com/ava-labs/avalanchego/utils/units"
 	"github.com/ava-labs/avalanchego/version"
 )
@@ -22,12 +22,12 @@ var (
 	UncompressingBuilder OutboundMsgBuilder
 	TestCodec            Codec
 
-	dummyNodeID             = ids.ShortEmpty
+	dummyNodeID             = ids.EmptyNodeID
 	dummyOnFinishedHandling = func() {}
 )
 
 func init() {
-	codec, err := NewCodecWithMemoryPool("", prometheus.NewRegistry(), 2*units.MiB)
+	codec, err := NewCodecWithMemoryPool("", prometheus.NewRegistry(), 2*units.MiB, 10*time.Second)
 	if err != nil {
 		panic(err)
 	}
@@ -35,23 +35,10 @@ func init() {
 	UncompressingBuilder = NewOutboundBuilder(codec, false /*compress*/)
 }
 
-func TestBuildGetVersion(t *testing.T) {
-	msg, err := UncompressingBuilder.GetVersion()
-	assert.NoError(t, err)
-	assert.NotNil(t, msg)
-	assert.Equal(t, GetVersion, msg.Op())
-
-	parsedMsg, err := TestCodec.Parse(msg.Bytes(), dummyNodeID, dummyOnFinishedHandling)
-	assert.NoError(t, err)
-	assert.NotNil(t, parsedMsg)
-	assert.Equal(t, GetVersion, parsedMsg.Op())
-}
-
 func TestBuildVersion(t *testing.T) {
 	networkID := uint32(12345)
-	nodeID := uint32(56789)
 	myTime := uint64(time.Now().Unix())
-	ip := utils.IPDesc{
+	ip := ips.IPPort{
 		IP: net.IPv4(1, 2, 3, 4),
 	}
 
@@ -62,7 +49,6 @@ func TestBuildVersion(t *testing.T) {
 	subnetIDs := [][]byte{subnetID[:]}
 	msg, err := UncompressingBuilder.Version(
 		networkID,
-		nodeID,
 		myTime,
 		ip,
 		myVersion,
@@ -80,25 +66,12 @@ func TestBuildVersion(t *testing.T) {
 	assert.NotNil(t, parsedMsg)
 	assert.Equal(t, Version, parsedMsg.Op())
 	assert.EqualValues(t, networkID, parsedMsg.Get(NetworkID))
-	assert.EqualValues(t, nodeID, parsedMsg.Get(NodeID))
 	assert.EqualValues(t, myTime, parsedMsg.Get(MyTime))
 	assert.EqualValues(t, ip, parsedMsg.Get(IP))
 	assert.EqualValues(t, myVersion, parsedMsg.Get(VersionStr))
 	assert.EqualValues(t, myVersionTime, parsedMsg.Get(VersionTime))
 	assert.EqualValues(t, sig, parsedMsg.Get(SigBytes))
 	assert.EqualValues(t, subnetIDs, parsedMsg.Get(TrackedSubnets))
-}
-
-func TestBuildGetPeerList(t *testing.T) {
-	msg, err := UncompressingBuilder.GetPeerList()
-	assert.NoError(t, err)
-	assert.NotNil(t, msg)
-	assert.Equal(t, GetPeerList, msg.Op())
-
-	parsedMsg, err := TestCodec.Parse(msg.Bytes(), dummyNodeID, dummyOnFinishedHandling)
-	assert.NoError(t, err)
-	assert.NotNil(t, parsedMsg)
-	assert.Equal(t, GetPeerList, parsedMsg.Op())
 }
 
 func TestBuildGetAcceptedFrontier(t *testing.T) {

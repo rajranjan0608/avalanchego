@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand"
-	"strings"
 	"testing"
 	"time"
 
@@ -21,11 +20,13 @@ import (
 	"github.com/ava-labs/avalanchego/chains/atomic"
 	"github.com/ava-labs/avalanchego/database/manager"
 	"github.com/ava-labs/avalanchego/ids"
+	"github.com/ava-labs/avalanchego/snow"
 	"github.com/ava-labs/avalanchego/snow/choices"
 	"github.com/ava-labs/avalanchego/snow/engine/common"
 	"github.com/ava-labs/avalanchego/utils/constants"
 	"github.com/ava-labs/avalanchego/utils/crypto"
 	"github.com/ava-labs/avalanchego/utils/formatting"
+	"github.com/ava-labs/avalanchego/utils/formatting/address"
 	"github.com/ava-labs/avalanchego/utils/json"
 	"github.com/ava-labs/avalanchego/utils/sampler"
 	"github.com/ava-labs/avalanchego/version"
@@ -813,19 +814,19 @@ func TestServiceGetTxJSON_CreateAssetTx(t *testing.T) {
 				Fx: &propertyfx.Fx{},
 			},
 		},
-		&common.SenderTest{},
+		&common.SenderTest{T: t},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	vm.batchTimeout = 0
 
-	err = vm.Bootstrapping()
+	err = vm.SetState(snow.Bootstrapping)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = vm.Bootstrapped()
+	err = vm.SetState(snow.NormalOp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -903,19 +904,19 @@ func TestServiceGetTxJSON_OperationTxWithNftxMintOp(t *testing.T) {
 				Fx: &propertyfx.Fx{},
 			},
 		},
-		&common.SenderTest{},
+		&common.SenderTest{T: t},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	vm.batchTimeout = 0
 
-	err = vm.Bootstrapping()
+	err = vm.SetState(snow.Bootstrapping)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = vm.Bootstrapped()
+	err = vm.SetState(snow.NormalOp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1008,19 +1009,19 @@ func TestServiceGetTxJSON_OperationTxWithMultipleNftxMintOp(t *testing.T) {
 				Fx: &propertyfx.Fx{},
 			},
 		},
-		&common.SenderTest{},
+		&common.SenderTest{T: t},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	vm.batchTimeout = 0
 
-	err = vm.Bootstrapping()
+	err = vm.SetState(snow.Bootstrapping)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = vm.Bootstrapped()
+	err = vm.SetState(snow.NormalOp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1115,19 +1116,19 @@ func TestServiceGetTxJSON_OperationTxWithSecpMintOp(t *testing.T) {
 				Fx: &propertyfx.Fx{},
 			},
 		},
-		&common.SenderTest{},
+		&common.SenderTest{T: t},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	vm.batchTimeout = 0
 
-	err = vm.Bootstrapping()
+	err = vm.SetState(snow.Bootstrapping)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = vm.Bootstrapped()
+	err = vm.SetState(snow.NormalOp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1222,19 +1223,19 @@ func TestServiceGetTxJSON_OperationTxWithMultipleSecpMintOp(t *testing.T) {
 				Fx: &propertyfx.Fx{},
 			},
 		},
-		&common.SenderTest{},
+		&common.SenderTest{T: t},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	vm.batchTimeout = 0
 
-	err = vm.Bootstrapping()
+	err = vm.SetState(snow.Bootstrapping)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = vm.Bootstrapped()
+	err = vm.SetState(snow.NormalOp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1330,19 +1331,19 @@ func TestServiceGetTxJSON_OperationTxWithPropertyFxMintOp(t *testing.T) {
 				Fx: &propertyfx.Fx{},
 			},
 		},
-		&common.SenderTest{},
+		&common.SenderTest{T: t},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	vm.batchTimeout = 0
 
-	err = vm.Bootstrapping()
+	err = vm.SetState(snow.Bootstrapping)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = vm.Bootstrapped()
+	err = vm.SetState(snow.NormalOp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1435,19 +1436,19 @@ func TestServiceGetTxJSON_OperationTxWithPropertyFxMintOpMultiple(t *testing.T) 
 				Fx: &propertyfx.Fx{},
 			},
 		},
-		&common.SenderTest{},
+		&common.SenderTest{T: t},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	vm.batchTimeout = 0
 
-	err = vm.Bootstrapping()
+	err = vm.SetState(snow.Bootstrapping)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = vm.Bootstrapped()
+	err = vm.SetState(snow.NormalOp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1852,7 +1853,7 @@ func TestServiceGetUTXOs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unknownChainAddr, err := formatting.FormatAddress("R", hrp, rawAddr.Bytes())
+	unknownChainAddr, err := address.Format("R", hrp, rawAddr.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2401,16 +2402,12 @@ func TestImportExportKey(t *testing.T) {
 	}
 	sk := skIntf.(*crypto.PrivateKeySECP256K1R)
 
-	privKeyStr, err := formatting.EncodeWithChecksum(formatting.CB58, sk.Bytes())
-	if err != nil {
-		t.Fatal(err)
-	}
 	importArgs := &ImportKeyArgs{
 		UserPass: api.UserPass{
 			Username: username,
 			Password: password,
 		},
-		PrivateKey: constants.SecretKeyPrefix + privKeyStr,
+		PrivateKey: sk,
 	}
 	importReply := &api.JSONAddress{}
 	if err = s.ImportKey(nil, importArgs, importReply); err != nil {
@@ -2433,15 +2430,7 @@ func TestImportExportKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !strings.HasPrefix(exportReply.PrivateKey, constants.SecretKeyPrefix) {
-		t.Fatalf("ExportKeyReply private key: %s mssing secret key prefix: %s", exportReply.PrivateKey, constants.SecretKeyPrefix)
-	}
-
-	parsedKeyBytes, err := formatting.Decode(formatting.CB58, strings.TrimPrefix(exportReply.PrivateKey, constants.SecretKeyPrefix))
-	if err != nil {
-		t.Fatal("Failed to parse exported private key")
-	}
-	if !bytes.Equal(sk.Bytes(), parsedKeyBytes) {
+	if !bytes.Equal(sk.Bytes(), exportReply.PrivateKey.Bytes()) {
 		t.Fatal("Unexpected key was found in ExportKeyReply")
 	}
 }
@@ -2462,16 +2451,12 @@ func TestImportAVMKeyNoDuplicates(t *testing.T) {
 		t.Fatalf("problem generating private key: %s", err)
 	}
 	sk := skIntf.(*crypto.PrivateKeySECP256K1R)
-	privKeyStr, err := formatting.EncodeWithChecksum(formatting.CB58, sk.Bytes())
-	if err != nil {
-		t.Fatal(err)
-	}
 	args := ImportKeyArgs{
 		UserPass: api.UserPass{
 			Username: username,
 			Password: password,
 		},
-		PrivateKey: constants.SecretKeyPrefix + privKeyStr,
+		PrivateKey: sk,
 	}
 	reply := api.JSONAddress{}
 	if err = s.ImportKey(nil, &args, &reply); err != nil {

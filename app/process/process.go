@@ -19,6 +19,7 @@ import (
 	"github.com/ava-labs/avalanchego/utils/dynamicip"
 	"github.com/ava-labs/avalanchego/utils/logging"
 	"github.com/ava-labs/avalanchego/utils/perms"
+	"github.com/ava-labs/avalanchego/utils/ulimit"
 	"github.com/ava-labs/avalanchego/version"
 )
 
@@ -53,7 +54,8 @@ func NewApp(config node.Config) app.App {
 }
 
 // Start the business logic of the node (as opposed to config reading, etc).
-// Does not block until the node is done.
+// Does not block until the node is done. Errors returned from this method
+// are not logged.
 func (p *process) Start() error {
 	// Set the data directory permissions to be read write.
 	if err := perms.ChmodR(p.config.DatabaseConfig.Path, true, perms.ReadWriteExecute); err != nil {
@@ -67,6 +69,14 @@ func (p *process) Start() error {
 	logFactory := logging.NewFactory(p.config.LoggingConfig)
 	log, err := logFactory.Make("main")
 	if err != nil {
+		logFactory.Close()
+		return err
+	}
+
+	// update fd limit
+	fdLimit := p.config.FdLimit
+	if err := ulimit.Set(fdLimit, log); err != nil {
+		log.Fatal("failed to set fd-limit: %s", err)
 		logFactory.Close()
 		return err
 	}
@@ -125,13 +135,13 @@ func (p *process) Start() error {
 	// Open staking port we want for NAT Traversal to have the external port
 	// (config.IP.Port) to connect to our internal listening port
 	// (config.InternalStakingPort) which should be the same in most cases.
-	if p.config.IP.IP().Port != 0 {
+	if p.config.IPPort.IPPort().Port != 0 {
 		mapper.Map(
 			"TCP",
-			p.config.IP.IP().Port,
-			p.config.IP.IP().Port,
+			p.config.IPPort.IPPort().Port,
+			p.config.IPPort.IPPort().Port,
 			stakingPortName,
-			&p.config.IP,
+			p.config.IPPort,
 			p.config.DynamicUpdateDuration,
 		)
 	}
@@ -155,7 +165,7 @@ func (p *process) Start() error {
 		p.config.DynamicPublicIPResolver,
 		p.config.DynamicUpdateDuration,
 		log,
-		&p.config.IP,
+		p.config.IPPort,
 	)
 
 	if err := p.node.Initialize(&p.config, dbManager, log, logFactory); err != nil {
